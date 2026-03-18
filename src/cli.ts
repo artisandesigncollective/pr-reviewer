@@ -18,9 +18,10 @@ program
 program
   .command('sync')
   .description('Sync all open PRs from GitHub')
-  .action(async () => {
+  .option('--full', 'Force full sync of all PRs, ignoring cached timestamps')
+  .action(async (opts) => {
     try {
-      await syncPullRequests();
+      await syncPullRequests({ full: opts.full ?? false });
     } catch (err: any) {
       console.error(`Sync failed: ${err.message}`);
       process.exit(1);

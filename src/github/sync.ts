@@ -5,7 +5,11 @@ import { parseGreptileScores } from './comments';
 import { CheckRun } from './checks';
 import chalk from 'chalk';
 
-export async function syncPullRequests(): Promise<void> {
+export interface SyncOptions {
+  full?: boolean;
+}
+
+export async function syncPullRequests(opts: SyncOptions = {}): Promise<void> {
   const octokit = getOctokit();
   const db = await getDb();
 
@@ -18,7 +22,11 @@ export async function syncPullRequests(): Promise<void> {
     per_page: 100,
   });
 
-  console.log(chalk.blue(`Found ${prs.length} open PRs. Checking for changes...`));
+  if (opts.full) {
+    console.log(chalk.blue(`Found ${prs.length} open PRs. Full sync forced...`));
+  } else {
+    console.log(chalk.blue(`Found ${prs.length} open PRs. Checking for changes...`));
+  }
 
   // --- Incremental sync: load cached timestamps & head SHAs ---
   const cachedRows = await db.all<{ number: number; updated_at: string; head_sha: string; mergeable: number | null; mergeable_state: string | null }>(
@@ -37,7 +45,7 @@ export async function syncPullRequests(): Promise<void> {
       const existing = cached.get(pr.number);
 
       // Skip detail fetch if the PR hasn't changed since last sync
-      if (existing && existing.updated_at === pr.updated_at) {
+      if (!opts.full && existing && existing.updated_at === pr.updated_at) {
         skipped++;
         completed++;
         process.stdout.write(`\r  ${chalk.green(`${completed}/${prs.length}`)} synced (${chalk.yellow(`${skipped} skipped`)})`);
