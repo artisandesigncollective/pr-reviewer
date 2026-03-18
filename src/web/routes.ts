@@ -13,7 +13,13 @@ function deriveCIStatus(totalChecks: number, failedChecks: number, pendingChecks
   return 'passing';
 }
 
-function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number): number {
+function locScore(additions: number, deletions: number): number {
+  const totalLoc = additions + deletions;
+  if (totalLoc === 0) return 15;
+  return Math.max(0, Math.round(15 - 3 * Math.log10(totalLoc)));
+}
+
+function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number, additions: number = 0, deletions: number = 0): number {
   let score = 0;
   if (greptileScore !== null) score += greptileScore * 8;
   switch (ciStatus) {
@@ -25,10 +31,11 @@ function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus,
   score += hasConflicts ? -15 : 15;
   if (humanComments >= 2) score += 20;
   else if (humanComments === 1) score += 10;
-  return Math.max(0, Math.min(100, score));
+  score += locScore(additions, deletions);
+  return Math.max(0, Math.min(115, score));
 }
 
-function scoreBreakdown(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number) {
+function scoreBreakdown(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number, additions: number = 0, deletions: number = 0) {
   const greptile = greptileScore !== null ? greptileScore * 8 : 0;
   let ci = 0;
   switch (ciStatus) {
@@ -40,12 +47,14 @@ function scoreBreakdown(greptileScore: number | null, ciStatus: CIStatus, hasCon
   let comments = 0;
   if (humanComments >= 2) comments = 20;
   else if (humanComments === 1) comments = 10;
+  const loc = locScore(additions, deletions);
   return {
-    total: Math.max(0, Math.min(100, greptile + ci + conflicts + comments)),
+    total: Math.max(0, Math.min(115, greptile + ci + conflicts + comments + loc)),
     greptile: { value: greptile, max: 40, input: greptileScore },
     ci: { value: ci, max: 25, input: ciStatus },
     conflicts: { value: conflicts, range: '-15 to +15', input: hasConflicts },
     humanComments: { value: comments, max: 20, input: humanComments },
+    loc: { value: loc, max: 15, input: additions + deletions, note: 'Fewer changes = higher score' },
   };
 }
 
@@ -64,7 +73,7 @@ function buildCandidate(row: any) {
     ciStatus,
     hasConflicts,
     humanComments: row.human_comments,
-    compositeScore: computeCompositeScore(row.greptile_score, ciStatus, hasConflicts, row.human_comments),
+    compositeScore: computeCompositeScore(row.greptile_score, ciStatus, hasConflicts, row.human_comments, row.additions ?? 0, row.deletions ?? 0),
     additions: row.additions ?? 0,
     deletions: row.deletions ?? 0,
     changedFiles: row.changed_files ?? 0,
@@ -168,7 +177,7 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     if (!row) return c.json({ error: 'PR not found' }, 404);
 
     const candidate = buildCandidate(row);
-    const breakdown = scoreBreakdown(candidate.greptileScore, candidate.ciStatus, candidate.hasConflicts, candidate.humanComments);
+    const breakdown = scoreBreakdown(candidate.greptileScore, candidate.ciStatus, candidate.hasConflicts, candidate.humanComments, candidate.additions, candidate.deletions);
 
     const pr = await db.get('SELECT * FROM pull_requests WHERE number = ?', [prNumber]);
     const scores = await db.all('SELECT * FROM greptile_scores WHERE pr_number = ? ORDER BY created_at DESC', [prNumber]);
@@ -275,14 +284,15 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
   // Scoring formula explanation
   api.get('/scoring', (_c) => {
     return _c.json({
-      description: 'Composite score (0-100) computed from four signals',
+      description: 'Composite score (0-115) computed from five signals',
       formula: {
         greptile: { weight: '0-40', calculation: 'greptileScore * 8', note: 'Greptile bot confidence score (1-5) from PR comments' },
         ci: { weight: '0-25', values: { passing: 25, pending: 12, unknown: 8, failing: 0 } },
         conflicts: { weight: '-15 to +15', values: { noConflicts: 15, hasConflicts: -15 } },
         humanComments: { weight: '0-20', values: { '0': 0, '1': 10, '2+': 20 }, note: 'Excludes bot comments (authors matching *[bot])' },
+        loc: { weight: '0-15', calculation: 'max(0, round(15 - 3 * log10(totalLoc)))', note: 'Fewer lines changed = higher score. 50 LOC ≈ 12pts, 200 LOC ≈ 8pts, 1000 LOC ≈ 6pts' },
       },
-      maxScore: 100,
+      maxScore: 115,
       minScore: 0,
     });
   });

@@ -46,9 +46,47 @@ describe('aggregateCheckStatus', () => {
   });
 });
 
+describe('locScore', () => {
+  function locScore(additions: number, deletions: number): number {
+    const totalLoc = additions + deletions;
+    if (totalLoc === 0) return 15;
+    return Math.max(0, Math.round(15 - 3 * Math.log10(totalLoc)));
+  }
+
+  it('0 LOC gives max score of 15', () => {
+    expect(locScore(0, 0)).toBe(15);
+  });
+
+  it('small PR (~10 LOC) scores high', () => {
+    expect(locScore(5, 5)).toBe(12);
+  });
+
+  it('medium PR (~200 LOC) scores moderately', () => {
+    expect(locScore(100, 100)).toBe(8);
+  });
+
+  it('large PR (~1000 LOC) scores low', () => {
+    expect(locScore(500, 500)).toBe(6);
+  });
+
+  it('very large PR (~10000 LOC) scores 3', () => {
+    expect(locScore(5000, 5000)).toBe(3);
+  });
+
+  it('never goes below 0', () => {
+    expect(locScore(500000, 500000)).toBe(0);
+  });
+});
+
 describe('composite score logic', () => {
   // Mirror the scoring formula from src/scoring/filter.ts and src/web/routes.ts
-  function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number): number {
+  function locScore(additions: number, deletions: number): number {
+    const totalLoc = additions + deletions;
+    if (totalLoc === 0) return 15;
+    return Math.max(0, Math.round(15 - 3 * Math.log10(totalLoc)));
+  }
+
+  function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number, additions: number = 0, deletions: number = 0): number {
     let score = 0;
     // Greptile: 0-40
     if (greptileScore !== null) score += greptileScore * 8;
@@ -64,19 +102,27 @@ describe('composite score logic', () => {
     // Human comments: 0-20
     if (humanComments >= 2) score += 20;
     else if (humanComments === 1) score += 10;
-    return Math.max(0, Math.min(100, score));
+    // LOC: 0-15 (fewer changes = higher score)
+    score += locScore(additions, deletions);
+    return Math.max(0, Math.min(115, score));
   }
 
-  it('max score: greptile 5 + passing CI + no conflicts + 2 comments = 100', () => {
-    expect(computeCompositeScore(5, 'passing', false, 2)).toBe(100);
+  it('max score: greptile 5 + passing CI + no conflicts + 2 comments + 0 LOC = 115', () => {
+    expect(computeCompositeScore(5, 'passing', false, 2, 0, 0)).toBe(115);
   });
 
   it('min score: no greptile + failing CI + conflicts + 0 comments = 0', () => {
-    expect(computeCompositeScore(null, 'failing', true, 0)).toBe(0);
+    expect(computeCompositeScore(null, 'failing', true, 0, 50000, 50000)).toBe(0);
   });
 
-  it('greptile 3 + passing CI + no conflicts + 0 comments = 64', () => {
-    expect(computeCompositeScore(3, 'passing', false, 0)).toBe(64);
+  it('greptile 3 + passing CI + no conflicts + 0 comments + 0 LOC = 79', () => {
+    expect(computeCompositeScore(3, 'passing', false, 0, 0, 0)).toBe(79);
+  });
+
+  it('smaller PRs score higher than larger PRs', () => {
+    const small = computeCompositeScore(3, 'passing', false, 0, 10, 10);
+    const large = computeCompositeScore(3, 'passing', false, 0, 500, 500);
+    expect(small).toBeGreaterThan(large);
   });
 
   it('conflicts reduce score by 30 vs no conflicts', () => {
@@ -97,8 +143,8 @@ describe('composite score logic', () => {
     expect(two - none).toBe(20);
   });
 
-  it('clamps to 0-100 range', () => {
-    expect(computeCompositeScore(null, 'failing', true, 0)).toBe(0);
-    expect(computeCompositeScore(5, 'passing', false, 5)).toBe(100);
+  it('clamps to 0-115 range', () => {
+    expect(computeCompositeScore(null, 'failing', true, 0, 50000, 50000)).toBe(0);
+    expect(computeCompositeScore(5, 'passing', false, 5, 0, 0)).toBe(115);
   });
 });
