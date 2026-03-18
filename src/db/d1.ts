@@ -48,21 +48,10 @@ export class D1Client implements DbClient {
 
   async runBatch(statements: BatchStatement[]): Promise<void> {
     if (statements.length === 0) return;
-
-    const response = await fetch(`${this.baseUrl}/query`, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(statements.map(s => ({ sql: s.sql, params: s.params }))),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`D1 batch error (${response.status}): ${text}`);
-    }
-
-    const data = await response.json() as D1Response;
-    if (!data.success) {
-      throw new Error(`D1 batch error: ${data.errors.map(e => e.message).join(', ')}`);
+    // D1 REST API /query only accepts a single statement per request.
+    // Run sequentially — the main perf win comes from incremental sync skipping unchanged PRs.
+    for (const stmt of statements) {
+      await this.query(stmt.sql, stmt.params);
     }
   }
 
