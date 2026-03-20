@@ -92,6 +92,14 @@
 
   .description { white-space: pre-wrap; font-size: 13px; color: var(--text-muted); max-height: 300px; overflow-y: auto; }
 
+  .similar-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .similar-table th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+  .similar-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .similar-table tr:hover td { background: var(--bg); }
+  .badge-orange { background: rgba(210,120,34,0.15); color: #d2783c; }
+  .badge-purple { background: rgba(163,113,247,0.15); color: #a371f7; }
+  .sim-bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--blue); vertical-align: middle; }
+
   .empty { text-align: center; padding: 48px; color: var(--text-muted); }
   .loading { text-align: center; padding: 48px; color: var(--text-muted); }
 
@@ -413,13 +421,16 @@ function riskBadge(risk) {
 async function showDetail(number) {
   document.getElementById('detailContent').innerHTML = '<div class="loading">Loading...</div>';
 
-  const [res, commentsRes] = await Promise.all([
+  const [res, commentsRes, similarRes] = await Promise.all([
     fetch(`/api/prs/${number}`),
     fetch(`/api/prs/${number}/comments`),
+    fetch(`/api/prs/${number}/similar`),
   ]);
   if (!res.ok) { document.getElementById('detailContent').innerHTML = '<div class="empty">PR not found</div>'; return; }
   const d = await res.json();
   const comments = commentsRes.ok ? await commentsRes.json() : [];
+  const similarData = similarRes.ok ? await similarRes.json() : { similar: [] };
+  const similar = similarData.similar || [];
   const sb = d.scoreBreakdown || {};
 
   document.getElementById('detailContent').innerHTML = `
@@ -477,6 +488,38 @@ async function showDetail(number) {
             ${r.review.reasoning ? `<div style="margin-top:8px;font-size:13px;color:var(--text-muted)">${esc(r.review.reasoning)}</div>` : ''}
           </div>
         `).join('') : '<div style="color:var(--text-muted)">Not yet reviewed</div>'}
+      </div>
+
+      <div class="card card-full">
+        <h3>Similar & Possibly Duplicate PRs</h3>
+        ${similar.length > 0 ? `
+          <table class="similar-table">
+            <thead><tr>
+              <th>#</th><th>Title</th><th>Author</th><th>Similarity</th><th>Files</th><th>Title</th><th>Body</th><th>Relationship</th><th>Created</th>
+            </tr></thead>
+            <tbody>
+              ${similar.map(s => {
+                const relBadge = s.relationship === 'potential copy' ? 'badge-red'
+                  : s.relationship === 'likely duplicate' ? 'badge-orange'
+                  : s.relationship === 'overlapping changes' ? 'badge-yellow'
+                  : s.relationship === 'similar topic' ? 'badge-purple'
+                  : 'badge-gray';
+                const fileLabel = s.sharedFiles > 0 ? `${Math.round(s.fileSimilarity * 100)}% (${s.sharedFiles} shared)` : `${Math.round(s.fileSimilarity * 100)}%`;
+                return `<tr style="cursor:pointer" onclick="navigate('/pr/${s.number}')">
+                  <td><a href="#/pr/${s.number}" onclick="event.stopPropagation()">#${s.number}</a> <a href="https://github.com/paperclipai/paperclip/pull/${s.number}" target="_blank" onclick="event.stopPropagation()" style="font-size:11px;color:var(--text-dim)">[gh]</a></td>
+                  <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.title)}</td>
+                  <td>${esc(s.author)}</td>
+                  <td><span class="sim-bar" style="width:${Math.round(s.overallScore * 60)}px"></span> ${Math.round(s.overallScore * 100)}%</td>
+                  <td>${fileLabel}</td>
+                  <td>${Math.round(s.titleSimilarity * 100)}%</td>
+                  <td>${Math.round(s.bodySimilarity * 100)}%</td>
+                  <td><span class="badge ${relBadge}">${s.relationship}</span></td>
+                  <td style="white-space:nowrap;color:var(--text-muted);font-size:12px">${timeAgo(s.created_at)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        ` : '<div style="color:var(--text-muted)">No similar PRs found</div>'}
       </div>
 
       ${d.body ? `<div class="card card-full"><h3>Description</h3><div class="description">${esc(d.body)}</div></div>` : ''}

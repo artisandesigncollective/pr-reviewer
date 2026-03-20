@@ -81,6 +81,39 @@ const PR_SELECT = `
     MAX(pr.updated_at, COALESCE((SELECT MAX(pc.created_at) FROM pr_comments pc WHERE pc.pr_number = pr.number), pr.updated_at)) as last_activity
   FROM pull_requests pr`;
 
+// --- Similarity helpers ---
+
+function tokenize(text: string): string[] {
+  return (text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+}
+
+function wordShingles(words: string[], n: number): Set<string> {
+  const shingles = new Set<string>();
+  for (let i = 0; i <= words.length - n; i++) {
+    shingles.add(words.slice(i, i + n).join(' '));
+  }
+  return shingles;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function extractDirs(filename: string): string[] {
+  const parts = filename.split('/');
+  const dirs: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    dirs.push(parts.slice(0, i).join('/'));
+  }
+  return dirs;
+}
+
 /** Create API routes with an injected DB client — no Node.js imports */
 export function createRoutes(getDb: () => Promise<DbClient>): Hono {
   const api = new Hono();
@@ -235,6 +268,126 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     const db = await getDb();
     const comments = await db.all('SELECT * FROM pr_comments WHERE pr_number = ? ORDER BY created_at ASC', [prNumber]);
     return c.json(comments);
+  });
+
+  // Similar / duplicate PR detection
+  api.get('/prs/:number/similar', async (c) => {
+    const prNumber = parseInt(c.req.param('number'));
+    if (isNaN(prNumber)) return c.json({ error: 'Invalid PR number' }, 400);
+
+    const db = await getDb();
+    const pr = await db.get<{ number: number; title: string; body: string | null; author: string; created_at: string }>(
+      'SELECT number, title, body, author, created_at FROM pull_requests WHERE number = ?', [prNumber]
+    );
+    if (!pr) return c.json({ error: 'PR not found' }, 404);
+
+    // Get all other PRs
+    const others = await db.all<{ number: number; title: string; body: string | null; author: string; created_at: string }>(
+      'SELECT number, title, body, author, created_at FROM pull_requests WHERE number != ?', [prNumber]
+    );
+
+    // Load file data for source PR
+    const srcFiles = await db.all<{ filename: string }>(
+      'SELECT filename FROM pr_files WHERE pr_number = ?', [prNumber]
+    );
+    const srcFileSet = new Set(srcFiles.map(f => f.filename));
+    const srcDirSet = new Set(srcFiles.flatMap(f => extractDirs(f.filename)));
+
+    // Load file data for all other PRs in bulk
+    const allFiles = await db.all<{ pr_number: number; filename: string }>(
+      'SELECT pr_number, filename FROM pr_files WHERE pr_number != ?', [prNumber]
+    );
+    const filesByPR = new Map<number, Set<string>>();
+    const dirsByPR = new Map<number, Set<string>>();
+    for (const f of allFiles) {
+      if (!filesByPR.has(f.pr_number)) {
+        filesByPR.set(f.pr_number, new Set());
+        dirsByPR.set(f.pr_number, new Set());
+      }
+      filesByPR.get(f.pr_number)!.add(f.filename);
+      for (const dir of extractDirs(f.filename)) {
+        dirsByPR.get(f.pr_number)!.add(dir);
+      }
+    }
+
+    const srcTitleWords = new Set(tokenize(pr.title));
+    const srcBodyWords = tokenize(pr.body || '');
+    const srcBodyShingles = wordShingles(srcBodyWords, 3);
+    const srcBodyBigrams = wordShingles(srcBodyWords, 2);
+
+    const results: Array<{
+      number: number; title: string; author: string; created_at: string;
+      titleSimilarity: number; bodySimilarity: number; fileSimilarity: number;
+      overallScore: number; sharedFiles: number;
+      potentialCopy: boolean; relationship: string;
+    }> = [];
+
+    for (const other of others) {
+      const otherTitleWords = new Set(tokenize(other.title));
+      const titleSim = jaccard(srcTitleWords, otherTitleWords);
+
+      const otherBodyWords = tokenize(other.body || '');
+      const otherBodyShingles = wordShingles(otherBodyWords, 3);
+      const otherBodyBigrams = wordShingles(otherBodyWords, 2);
+
+      let bodySim: number;
+      if (srcBodyShingles.size >= 3 && otherBodyShingles.size >= 3) {
+        bodySim = jaccard(srcBodyShingles, otherBodyShingles);
+      } else {
+        bodySim = jaccard(srcBodyBigrams, otherBodyBigrams);
+      }
+
+      // File overlap
+      const otherFileSet = filesByPR.get(other.number) || new Set<string>();
+      const otherDirSet = dirsByPR.get(other.number) || new Set<string>();
+      const fileSim = jaccard(srcFileSet, otherFileSet);
+      const dirSim = jaccard(srcDirSet, otherDirSet);
+
+      // Count shared files for display
+      let sharedFiles = 0;
+      for (const f of srcFileSet) {
+        if (otherFileSet.has(f)) sharedFiles++;
+      }
+
+      // Score by text only — file overlap is displayed but doesn't affect ranking
+      const overall = titleSim * 0.4 + bodySim * 0.6;
+
+      if (overall < 0.08) continue;
+
+      const sameAuthor = pr.author === other.author;
+      const potentialCopy = !sameAuthor && bodySim > 0.5;
+
+      let relationship = 'related';
+      if (potentialCopy) {
+        relationship = 'potential copy';
+      } else if (overall > 0.5) {
+        relationship = 'likely duplicate';
+      } else if (titleSim > 0.5 && bodySim < 0.15) {
+        relationship = 'similar topic';
+      }
+
+      results.push({
+        number: other.number,
+        title: other.title,
+        author: other.author,
+        created_at: other.created_at,
+        titleSimilarity: Math.round(titleSim * 100) / 100,
+        bodySimilarity: Math.round(bodySim * 100) / 100,
+        fileSimilarity: Math.round(fileSim * 100) / 100,
+        overallScore: Math.round(overall * 100) / 100,
+        sharedFiles,
+        potentialCopy,
+        relationship,
+      });
+    }
+
+    // Sort by overall score descending
+    results.sort((a, b) => b.overallScore - a.overallScore);
+
+    return c.json({
+      pr: prNumber,
+      similar: results.slice(0, 8),
+    });
   });
 
   // List unique labels across all PRs
