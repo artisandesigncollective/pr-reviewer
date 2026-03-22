@@ -487,6 +487,31 @@ async function showDetail(number) {
         `).join('') : '<div style="color:var(--text-muted)">No checks</div>'}
       </div>
 
+      ${d.contributor ? `<div class="card card-full">
+        <h3>Contributor: ${esc(d.author)}</h3>
+        <div style="display:flex;gap:24px;align-items:flex-start">
+          <div style="flex:0 0 auto;text-align:center;padding:8px 16px">
+            <div class="score-bar ${d.contributor.score >= 70 ? 'score-high' : d.contributor.score >= 40 ? 'score-mid' : 'score-low'}" style="font-size:28px">${d.contributor.score}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">PRIORITY</div>
+          </div>
+          <div style="flex:1;display:flex;gap:16px;flex-wrap:wrap">
+            <div style="min-width:140px">
+              <div class="prop"><span class="prop-label">Open PRs</span><span>${d.contributor.stats.openCount}</span></div>
+              <div class="prop"><span class="prop-label">Merged</span><span>${d.contributor.stats.mergedCount}</span></div>
+              <div class="prop"><span class="prop-label">Closed</span><span>${d.contributor.stats.closedCount}</span></div>
+              <div class="prop"><span class="prop-label">Merge rate</span><span>${d.contributor.stats.mergedCount + d.contributor.stats.closedCount > 0 ? Math.round(d.contributor.stats.mergeRate * 100) + '%' : '—'}</span></div>
+            </div>
+            <div style="flex:1">
+              ${Object.entries(d.contributor.breakdown).map(([k, b]) => `
+                <div style="font-size:13px;padding:2px 0;${b.value > 0 ? 'color:var(--green)' : b.value < 0 ? 'color:var(--red)' : 'color:var(--text-muted)'}">
+                  ${b.value > 0 ? '+' : ''}${b.value} ${b.reason}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      </div>` : ''}
+
       <div class="card card-full">
         <h3>LLM Reviews</h3>
         ${d.reviews && d.reviews.length ? d.reviews.map(r => `

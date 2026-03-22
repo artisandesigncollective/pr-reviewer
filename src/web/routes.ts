@@ -128,6 +128,66 @@ function extractDirs(filename: string): string[] {
   return dirs;
 }
 
+// --- Contributor scoring ---
+
+interface AuthorStats {
+  openCount: number;
+  mergedCount: number;
+  closedCount: number;
+  totalCount: number;
+  mergeRate: number;
+  isFirstContribution: boolean;
+}
+
+function computeContributorScore(stats: AuthorStats): { score: number; breakdown: Record<string, { value: number; reason: string }> } {
+  const breakdown: Record<string, { value: number; reason: string }> = {};
+
+  // First-time contributor: high priority to give a good experience
+  if (stats.isFirstContribution) {
+    breakdown.newcomer = { value: 15, reason: 'First contribution — prioritize for welcome experience' };
+  }
+
+  // Track record: merged PRs show a proven contributor
+  if (stats.mergedCount >= 5) {
+    breakdown.trackRecord = { value: 20, reason: `${stats.mergedCount} merged PRs — proven contributor` };
+  } else if (stats.mergedCount >= 2) {
+    breakdown.trackRecord = { value: 12, reason: `${stats.mergedCount} merged PRs — returning contributor` };
+  } else if (stats.mergedCount === 1) {
+    breakdown.trackRecord = { value: 6, reason: '1 merged PR — has landed work before' };
+  } else {
+    breakdown.trackRecord = { value: 0, reason: 'No merged PRs yet' };
+  }
+
+  // Merge rate: high merge rate = quality submissions
+  const decided = stats.mergedCount + stats.closedCount;
+  if (decided >= 2) {
+    if (stats.mergeRate >= 0.8) {
+      breakdown.mergeRate = { value: 15, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — high quality` };
+    } else if (stats.mergeRate >= 0.5) {
+      breakdown.mergeRate = { value: 8, reason: `${Math.round(stats.mergeRate * 100)}% merge rate` };
+    } else {
+      breakdown.mergeRate = { value: -10, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — most PRs closed unmerged` };
+    }
+  } else {
+    breakdown.mergeRate = { value: 0, reason: 'Not enough history to judge' };
+  }
+
+  // Open PR load: more open PRs = active contributor needing review bandwidth
+  if (stats.openCount >= 5) {
+    breakdown.openLoad = { value: 15, reason: `${stats.openCount} open PRs — heavy contributor, needs review bandwidth` };
+  } else if (stats.openCount >= 3) {
+    breakdown.openLoad = { value: 10, reason: `${stats.openCount} open PRs — active contributor` };
+  } else if (stats.openCount >= 2) {
+    breakdown.openLoad = { value: 5, reason: `${stats.openCount} open PRs` };
+  } else {
+    breakdown.openLoad = { value: 0, reason: '1 open PR' };
+  }
+
+  const base = 50;
+  const total = base + Object.values(breakdown).reduce((sum, b) => sum + b.value, 0);
+  return { score: Math.max(0, Math.min(100, total)), breakdown };
+}
+
 /** Create API routes with an injected DB client — no Node.js imports */
 export function createRoutes(getDb: () => Promise<DbClient>): Hono {
   const api = new Hono();
@@ -222,6 +282,23 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
       review: JSON.parse(r.review_json),
     }));
 
+    // Contributor stats
+    const author = candidate.author;
+    const authorRows = await db.all<{ state: string }>(
+      'SELECT state FROM pull_requests WHERE author = ?', [author]
+    );
+    const openCount = authorRows.filter(r => r.state === 'open').length;
+    const mergedCount = authorRows.filter(r => r.state === 'merged').length;
+    const closedCount = authorRows.filter(r => r.state === 'closed').length;
+    const totalCount = authorRows.length;
+    const decided = mergedCount + closedCount;
+    const mergeRate = decided > 0 ? mergedCount / decided : 0;
+    // First contribution: this is their only PR we know about
+    const isFirstContribution = totalCount === 1;
+
+    const authorStats: AuthorStats = { openCount, mergedCount, closedCount, totalCount, mergeRate, isFirstContribution };
+    const contributor = computeContributorScore(authorStats);
+
     return c.json({
       ...candidate,
       body: (pr as any)?.body ?? null,
@@ -230,6 +307,11 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
       greptileScores: scores,
       checks,
       reviews,
+      contributor: {
+        score: contributor.score,
+        breakdown: contributor.breakdown,
+        stats: authorStats,
+      },
     });
   });
 
