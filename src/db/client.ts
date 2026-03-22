@@ -132,6 +132,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS pr_comments_fts USING fts5(
   content_rowid=comment_id
 );
 
+CREATE TABLE IF NOT EXISTS pr_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_number INTEGER NOT NULL REFERENCES pull_requests(number),
+  filename TEXT NOT NULL,
+  status TEXT NOT NULL,
+  UNIQUE(pr_number, filename)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_files_pr ON pr_files(pr_number);
+CREATE INDEX IF NOT EXISTS idx_pr_files_filename ON pr_files(filename);
+
 CREATE TABLE IF NOT EXISTS sync_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

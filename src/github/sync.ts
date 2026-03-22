@@ -176,6 +176,22 @@ export async function syncPullRequests(opts: SyncOptions = {}): Promise<void> {
         });
       }
 
+      // Sync changed files
+      const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        pull_number: pr.number,
+        per_page: 100,
+      });
+
+      await db.run('DELETE FROM pr_files WHERE pr_number = ?', [pr.number]);
+      for (const file of files) {
+        await db.run(`
+          INSERT INTO pr_files (pr_number, filename, status)
+          VALUES (?, ?, ?)
+        `, [pr.number, file.filename, file.status]);
+      }
+
       // Upsert check runs
       for (const check of checks) {
         batch.push({
