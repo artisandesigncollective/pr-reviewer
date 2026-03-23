@@ -144,29 +144,31 @@ function computeContributorScore(stats: AuthorStats): { score: number; breakdown
 
   // First-time contributor: high priority to give a good experience
   if (stats.isFirstContribution) {
-    breakdown.newcomer = { value: 15, reason: 'First contribution — prioritize for welcome experience' };
+    breakdown.newcomer = { value: 15, reason: 'First contribution' };
   }
 
-  // Track record: merged PRs show a proven contributor
+  // Track record: merged PRs show a proven contributor (kept modest so it can't mask bad merge rate)
   if (stats.mergedCount >= 5) {
-    breakdown.trackRecord = { value: 20, reason: `${stats.mergedCount} merged PRs — proven contributor` };
+    breakdown.trackRecord = { value: 10, reason: `${stats.mergedCount} merged PRs — proven contributor` };
   } else if (stats.mergedCount >= 2) {
-    breakdown.trackRecord = { value: 12, reason: `${stats.mergedCount} merged PRs — returning contributor` };
+    breakdown.trackRecord = { value: 6, reason: `${stats.mergedCount} merged PRs — returning contributor` };
   } else if (stats.mergedCount === 1) {
-    breakdown.trackRecord = { value: 6, reason: '1 merged PR — has landed work before' };
+    breakdown.trackRecord = { value: 3, reason: '1 merged PR — has landed work before' };
   } else {
     breakdown.trackRecord = { value: 0, reason: 'No merged PRs yet' };
   }
 
-  // Merge rate: high merge rate = quality submissions
+  // Merge rate: strong penalty for low rates, reward for high rates
   const decided = stats.mergedCount + stats.closedCount;
   if (decided >= 2) {
     if (stats.mergeRate >= 0.8) {
-      breakdown.mergeRate = { value: 15, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — high quality` };
+      breakdown.mergeRate = { value: 10, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — high quality` };
     } else if (stats.mergeRate >= 0.5) {
-      breakdown.mergeRate = { value: 8, reason: `${Math.round(stats.mergeRate * 100)}% merge rate` };
+      breakdown.mergeRate = { value: 5, reason: `${Math.round(stats.mergeRate * 100)}% merge rate` };
+    } else if (stats.mergeRate >= 0.3) {
+      breakdown.mergeRate = { value: -20, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — most PRs closed unmerged` };
     } else {
-      breakdown.mergeRate = { value: -10, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — most PRs closed unmerged` };
+      breakdown.mergeRate = { value: -30, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — very few PRs merged` };
     }
   } else {
     breakdown.mergeRate = { value: 0, reason: 'Not enough history to judge' };
@@ -174,11 +176,11 @@ function computeContributorScore(stats: AuthorStats): { score: number; breakdown
 
   // Open PR load: more open PRs = active contributor needing review bandwidth
   if (stats.openCount >= 5) {
-    breakdown.openLoad = { value: 15, reason: `${stats.openCount} open PRs — heavy contributor, needs review bandwidth` };
+    breakdown.openLoad = { value: 10, reason: `${stats.openCount} open PRs — heavy contributor, needs review bandwidth` };
   } else if (stats.openCount >= 3) {
-    breakdown.openLoad = { value: 10, reason: `${stats.openCount} open PRs — active contributor` };
+    breakdown.openLoad = { value: 6, reason: `${stats.openCount} open PRs — active contributor` };
   } else if (stats.openCount >= 2) {
-    breakdown.openLoad = { value: 5, reason: `${stats.openCount} open PRs` };
+    breakdown.openLoad = { value: 3, reason: `${stats.openCount} open PRs` };
   } else {
     breakdown.openLoad = { value: 0, reason: '1 open PR' };
   }
@@ -222,6 +224,40 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     const rows = await db.all(`${PR_SELECT} ${whereClause} ORDER BY pr.number DESC`, params);
 
     let candidates = rows.map(buildCandidate);
+
+    // Batch-compute contributor scores for all authors
+    const authorStatRows = await db.all<{ author: string; state: string; cnt: number }>(
+      'SELECT author, state, COUNT(*) as cnt FROM pull_requests GROUP BY author, state'
+    );
+    const authorMap = new Map<string, AuthorStats>();
+    for (const r of authorStatRows) {
+      if (!authorMap.has(r.author)) {
+        authorMap.set(r.author, { openCount: 0, mergedCount: 0, closedCount: 0, totalCount: 0, mergeRate: 0, isFirstContribution: false });
+      }
+      const s = authorMap.get(r.author)!;
+      if (r.state === 'open') s.openCount = r.cnt;
+      else if (r.state === 'merged') s.mergedCount = r.cnt;
+      else if (r.state === 'closed') s.closedCount = r.cnt;
+    }
+    for (const [, s] of authorMap) {
+      s.totalCount = s.openCount + s.mergedCount + s.closedCount;
+      const decided = s.mergedCount + s.closedCount;
+      s.mergeRate = decided > 0 ? s.mergedCount / decided : 0;
+      s.isFirstContribution = s.totalCount === 1;
+    }
+
+    // Enrich candidates with contributor score and full breakdown
+    for (const c of candidates as any[]) {
+      const stats = authorMap.get(c.author) || { openCount: 0, mergedCount: 0, closedCount: 0, totalCount: 0, mergeRate: 0, isFirstContribution: true };
+      const contrib = computeContributorScore(stats);
+      const contributorPts = Math.round((contrib.score - 50) * 0.5); // -25 to +25
+      c.contributorPts = contributorPts;
+      c.contributorScore = contrib.score;
+      c.compositeScore = Math.max(0, Math.min(140, c.compositeScore + contributorPts));
+
+      const bd = scoreBreakdown(c.greptileScore, c.ciStatus, c.hasConflicts, c.humanComments, c.additions, c.deletions);
+      c.breakdown = { ...bd, contributor: { value: contributorPts, range: '-25 to +25', input: contrib.score } };
+    }
 
     if (minScore) candidates = candidates.filter(r => r.greptileScore !== null && r.greptileScore >= parseInt(minScore));
     if (ci && ['passing', 'failing', 'pending'].includes(ci)) candidates = candidates.filter(r => r.ciStatus === ci);
@@ -519,15 +555,16 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
   // Scoring formula explanation
   api.get('/scoring', (_c) => {
     return _c.json({
-      description: 'Composite score (0-115) computed from five signals',
+      description: 'Composite score (0-140) computed from six signals',
       formula: {
         greptile: { weight: '0-40', calculation: 'greptileScore * 8', note: 'Greptile bot confidence score (1-5) from PR comments' },
         ci: { weight: '0-25', values: { passing: 25, pending: 12, unknown: 8, failing: 0 } },
         conflicts: { weight: '-15 to +15', values: { noConflicts: 15, hasConflicts: -15 } },
         humanComments: { weight: '0-20', values: { '0': 0, '1': 10, '2+': 20 }, note: 'Excludes bot comments (authors matching *[bot])' },
         loc: { weight: '0-15', calculation: 'max(0, round(15 - 3 * log10(totalLoc)))', note: 'Fewer lines changed = higher score. 50 LOC ≈ 12pts, 200 LOC ≈ 8pts, 1000 LOC ≈ 6pts' },
+        contributor: { weight: '-25 to +25', calculation: 'round((contributorScore - 50) * 0.5)', note: 'Contributor priority (0-100) centered at 50. Low merge rate authors get penalized, proven contributors get a boost' },
       },
-      maxScore: 115,
+      maxScore: 140,
       minScore: 0,
     });
   });

@@ -100,6 +100,15 @@
   .badge-purple { background: rgba(163,113,247,0.15); color: #a371f7; }
   .sim-bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--blue); vertical-align: middle; }
 
+  .score-tip { position: relative; display: inline-block; cursor: default; }
+  .score-tip .tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; min-width: 240px; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  .score-tip:hover .tip { display: block; }
+  .tip table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .tip td { padding: 3px 6px; border: none; }
+  .tip td:first-child { color: var(--text-muted); }
+  .tip td:last-child { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tip tr.tip-total td { border-top: 1px solid var(--border); padding-top: 6px; font-weight: 700; }
+
   .empty { text-align: center; padding: 48px; color: var(--text-muted); }
   .loading { text-align: center; padding: 48px; color: var(--text-muted); }
 
@@ -271,7 +280,7 @@ async function loadStats() {
   const res = await fetch('/api/stats');
   const s = await res.json();
   document.getElementById('stats').innerHTML = `
-    <div class="stat"><div class="stat-value">${s.totalPRs}</div><div class="stat-label">Open PRs</div></div>
+    <div class="stat"><div class="stat-value">${s.openPRs}</div><div class="stat-label">Open PRs</div></div>
     <div class="stat"><div class="stat-value">${s.mergedPRs || 0}</div><div class="stat-label">Merged</div></div>
     <div class="stat"><div class="stat-value">${s.closedPRs || 0}</div><div class="stat-label">Closed</div></div>
     <div class="stat"><div class="stat-value">${s.withGreptileScores}</div><div class="stat-label">Greptile Scored</div></div>
@@ -344,7 +353,15 @@ function renderTable() {
       <td style="white-space:nowrap;font-size:13px"><span style="color:#3fb950">+${pr.additions || 0}</span> <span style="color:#f85149">-${pr.deletions || 0}</span></td>
       <td>${pr.hasConflicts ? '<span class="badge badge-red">yes</span>' : '<span class="badge badge-green">no</span>'}</td>
       <td>${pr.humanComments || 0}</td>
-      <td><span class="score-bar ${pr.compositeScore >= 70 ? 'score-high' : pr.compositeScore >= 40 ? 'score-mid' : 'score-low'}">${pr.compositeScore}</span></td>
+      <td><span class="score-tip" onclick="event.stopPropagation()"><span class="score-bar ${pr.compositeScore >= 80 ? 'score-high' : pr.compositeScore >= 50 ? 'score-mid' : 'score-low'}">${pr.compositeScore}</span>${pr.breakdown ? `<span class="tip"><table>
+        <tr><td>Greptile</td><td>${pr.breakdown.greptile?.value ?? 0} / 40</td></tr>
+        <tr><td>CI</td><td>${pr.breakdown.ci?.value ?? 0} / 25</td></tr>
+        <tr><td>Conflicts</td><td>${pr.breakdown.conflicts?.value ?? 0} / 15</td></tr>
+        <tr><td>Comments</td><td>${pr.breakdown.humanComments?.value ?? 0} / 20</td></tr>
+        <tr><td>LOC</td><td>${pr.breakdown.loc?.value ?? 0} / 15</td></tr>
+        <tr><td>Contributor</td><td>${(pr.breakdown.contributor?.value ?? 0) > 0 ? '+' : ''}${pr.breakdown.contributor?.value ?? 0}</td></tr>
+        <tr class="tip-total"><td>Total</td><td>${pr.compositeScore} / 140</td></tr>
+      </table></span>` : ''}</span></td>
       <td style="white-space:nowrap;color:var(--text-muted);font-size:13px" title="${pr.lastActivity || ''}">${timeAgo(pr.lastActivity)}</td>
     </tr>
   `).join('');
@@ -459,7 +476,7 @@ async function showDetail(number) {
 
       <div class="card">
         <h3>Score Breakdown</h3>
-        <div class="prop"><span class="prop-label">Composite</span><span class="score-bar ${d.compositeScore >= 70 ? 'score-high' : d.compositeScore >= 40 ? 'score-mid' : 'score-low'}">${d.compositeScore}/115</span></div>
+        <div class="prop"><span class="prop-label">Composite</span><span class="score-bar ${d.compositeScore >= 80 ? 'score-high' : d.compositeScore >= 50 ? 'score-mid' : 'score-low'}">${d.compositeScore}/140</span></div>
         <div class="prop"><span class="prop-label">Greptile (0-40)</span><span>${sb.greptile?.value ?? 0} ${d.greptileScore !== null ? '(' + d.greptileScore + '/5)' : ''}</span></div>
         <div class="prop"><span class="prop-label">CI (0-25)</span><span>${sb.ci?.value ?? 0}</span></div>
         <div class="prop"><span class="prop-label">Conflicts (-15/+15)</span><span>${sb.conflicts?.value ?? 0}</span></div>
