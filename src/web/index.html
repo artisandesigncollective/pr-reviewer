@@ -188,7 +188,6 @@
           <th data-sort="author">Author</th>
           <th data-sort="greptileScore">Greptile</th>
           <th data-sort="ciStatus">CI</th>
-          <th>Labels</th>
           <th data-sort="loc">LOC</th>
           <th data-sort="hasConflicts">Conflicts</th>
           <th data-sort="humanComments">Comments</th>
@@ -337,7 +336,7 @@ function renderTable() {
 
   const tbody = document.getElementById('prTable');
   if (sorted.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty">No PRs match filters</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No PRs match filters</td></tr>';
     document.getElementById('pagination').style.display = 'none';
     return;
   }
@@ -349,7 +348,6 @@ function renderTable() {
       <td>${esc(pr.author)}</td>
       <td>${pr.greptileScore !== null ? `<span class="score-bar ${pr.greptileScore >= 4 ? 'score-high' : pr.greptileScore >= 3 ? 'score-mid' : 'score-low'}">${pr.greptileScore}/5</span>` : '<span class="badge badge-gray">\u2014</span>'}</td>
       <td>${ciDot(pr.ciStatus)}</td>
-      <td class="labels-cell">${renderLabels(pr.labels)}</td>
       <td style="white-space:nowrap;font-size:13px"><span style="color:#3fb950">+${pr.additions || 0}</span> <span style="color:#f85149">-${pr.deletions || 0}</span></td>
       <td>${pr.hasConflicts ? '<span class="badge badge-red">yes</span>' : '<span class="badge badge-green">no</span>'}</td>
       <td>${pr.humanComments || 0}</td>
@@ -360,7 +358,11 @@ function renderTable() {
         <tr><td>Comments</td><td>${pr.breakdown.humanComments?.value ?? 0} / 20</td></tr>
         <tr><td>LOC</td><td>${pr.breakdown.loc?.value ?? 0} / 15</td></tr>
         <tr><td>Contributor</td><td>${(pr.breakdown.contributor?.value ?? 0) > 0 ? '+' : ''}${pr.breakdown.contributor?.value ?? 0}</td></tr>
-        <tr class="tip-total"><td>Total</td><td>${pr.compositeScore} / 140</td></tr>
+        <tr><td>Tests</td><td>${pr.breakdown.tests?.value ?? 0} / 10</td></tr>
+        <tr><td>Thinking Path</td><td>${pr.breakdown.thinkingPath?.value ?? 0} / 10</td></tr>
+        <tr><td>Issue Link</td><td>${pr.breakdown.issueLink?.value ?? 0} / 10</td></tr>
+        <tr><td>Freshness</td><td>${pr.breakdown.freshness?.value ?? 0} / 10${pr.breakdown.freshness?.input != null ? ' (' + pr.breakdown.freshness.input + 'd)' : ''}</td></tr>
+        <tr class="tip-total"><td>Total</td><td>${pr.compositeScore} / 180</td></tr>
       </table></span>` : ''}</span></td>
       <td style="white-space:nowrap;color:var(--text-muted);font-size:13px" title="${pr.lastActivity || ''}">${timeAgo(pr.lastActivity)}</td>
     </tr>
@@ -476,12 +478,17 @@ async function showDetail(number) {
 
       <div class="card">
         <h3>Score Breakdown</h3>
-        <div class="prop"><span class="prop-label">Composite</span><span class="score-bar ${d.compositeScore >= 80 ? 'score-high' : d.compositeScore >= 50 ? 'score-mid' : 'score-low'}">${d.compositeScore}/140</span></div>
+        <div class="prop"><span class="prop-label">Composite</span><span class="score-bar ${d.compositeScore >= 100 ? 'score-high' : d.compositeScore >= 65 ? 'score-mid' : 'score-low'}">${d.compositeScore}/180</span></div>
         <div class="prop"><span class="prop-label">Greptile (0-40)</span><span>${sb.greptile?.value ?? 0} ${d.greptileScore !== null ? '(' + d.greptileScore + '/5)' : ''}</span></div>
         <div class="prop"><span class="prop-label">CI (0-25)</span><span>${sb.ci?.value ?? 0}</span></div>
         <div class="prop"><span class="prop-label">Conflicts (-15/+15)</span><span>${sb.conflicts?.value ?? 0}</span></div>
         <div class="prop"><span class="prop-label">Comments (0-20)</span><span>${sb.humanComments?.value ?? 0} (${d.humanComments} human)</span></div>
         <div class="prop"><span class="prop-label">LOC (0-15)</span><span>${sb.loc?.value ?? 0} (${sb.loc?.input ?? 0} lines)</span></div>
+        <div class="prop"><span class="prop-label">Contributor (-25/+25)</span><span>${sb.contributor?.value ?? 0}</span></div>
+        <div class="prop"><span class="prop-label">Tests (0-10)</span><span>${sb.tests?.value ?? 0}${d.hasTests ? ' (includes tests)' : ''}</span></div>
+        <div class="prop"><span class="prop-label">Thinking Path (0-10)</span><span>${sb.thinkingPath?.value ?? 0}${d.hasThinkingPath ? ' (included)' : ''}</span></div>
+        <div class="prop"><span class="prop-label">Issue Link (0-10)</span><span>${sb.issueLink?.value ?? 0}${d.hasIssueLink ? ' (linked)' : ''}</span></div>
+        <div class="prop"><span class="prop-label">Freshness (0-10)</span><span>${sb.freshness?.value ?? 0}${sb.freshness?.input != null ? ' (' + sb.freshness.input + ' days old)' : ''}</span></div>
       </div>
 
       <div class="card">

@@ -35,28 +35,6 @@ function computeCompositeScore(greptileScore: number | null, ciStatus: CIStatus,
   return Math.max(0, Math.min(115, score));
 }
 
-function scoreBreakdown(greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean, humanComments: number, additions: number = 0, deletions: number = 0) {
-  const greptile = greptileScore !== null ? greptileScore * 8 : 0;
-  let ci = 0;
-  switch (ciStatus) {
-    case 'passing': ci = 25; break;
-    case 'pending': ci = 12; break;
-    case 'unknown': ci = 8; break;
-  }
-  const conflicts = hasConflicts ? -15 : 15;
-  let comments = 0;
-  if (humanComments >= 2) comments = 20;
-  else if (humanComments === 1) comments = 10;
-  const loc = locScore(additions, deletions);
-  return {
-    total: Math.max(0, Math.min(115, greptile + ci + conflicts + comments + loc)),
-    greptile: { value: greptile, max: 40, input: greptileScore },
-    ci: { value: ci, max: 25, input: ciStatus },
-    conflicts: { value: conflicts, range: '-15 to +15', input: hasConflicts },
-    humanComments: { value: comments, max: 20, input: humanComments },
-    loc: { value: loc, max: 15, input: additions + deletions, note: 'Fewer changes = higher score' },
-  };
-}
 
 function buildCandidate(row: any) {
   const ciStatus = deriveCIStatus(row.total_checks, row.failed_checks, row.pending_checks);
@@ -158,17 +136,20 @@ function computeContributorScore(stats: AuthorStats): { score: number; breakdown
     breakdown.trackRecord = { value: 0, reason: 'No merged PRs yet' };
   }
 
-  // Merge rate: strong penalty for low rates, reward for high rates
+  // Merge rate: smooth gradient
   const decided = stats.mergedCount + stats.closedCount;
   if (decided >= 2) {
+    const pct = Math.round(stats.mergeRate * 100);
     if (stats.mergeRate >= 0.8) {
-      breakdown.mergeRate = { value: 10, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — high quality` };
-    } else if (stats.mergeRate >= 0.5) {
-      breakdown.mergeRate = { value: 5, reason: `${Math.round(stats.mergeRate * 100)}% merge rate` };
-    } else if (stats.mergeRate >= 0.3) {
-      breakdown.mergeRate = { value: -20, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — most PRs closed unmerged` };
+      breakdown.mergeRate = { value: 10, reason: `${pct}% merge rate — high quality` };
+    } else if (stats.mergeRate >= 0.6) {
+      breakdown.mergeRate = { value: 5, reason: `${pct}% merge rate — above average` };
+    } else if (stats.mergeRate >= 0.4) {
+      breakdown.mergeRate = { value: 0, reason: `${pct}% merge rate` };
+    } else if (stats.mergeRate >= 0.2) {
+      breakdown.mergeRate = { value: -15, reason: `${pct}% merge rate — below average` };
     } else {
-      breakdown.mergeRate = { value: -30, reason: `${Math.round(stats.mergeRate * 100)}% merge rate — very few PRs merged` };
+      breakdown.mergeRate = { value: -30, reason: `${pct}% merge rate — very few PRs merged` };
     }
   } else {
     breakdown.mergeRate = { value: 0, reason: 'Not enough history to judge' };
@@ -188,6 +169,81 @@ function computeContributorScore(stats: AuthorStats): { score: number; breakdown
   const base = 50;
   const total = base + Object.values(breakdown).reduce((sum, b) => sum + b.value, 0);
   return { score: Math.max(0, Math.min(100, total)), breakdown };
+}
+
+// --- Detection patterns ---
+
+const TEST_FILE_SQL = `lower(filename) LIKE '%.test.%' OR lower(filename) LIKE '%_test.%' OR lower(filename) LIKE '%/__tests__/%' OR lower(filename) LIKE '%.spec.%' OR lower(filename) LIKE '%_spec.%'`;
+
+const THINKING_PATH_SQL = `lower(body) LIKE '%thinking path%'`;
+
+const ISSUE_LINK_SQL = `lower(body) LIKE '%closes #%' OR lower(body) LIKE '%fixes #%' OR lower(body) LIKE '%resolves #%' OR body LIKE '%/issues/%'`;
+
+function detectThinkingPath(body: string): boolean {
+  return body.toLowerCase().includes('thinking path');
+}
+
+function detectIssueLink(body: string): boolean {
+  const lower = body.toLowerCase();
+  return lower.includes('closes #') || lower.includes('fixes #') || lower.includes('resolves #') || body.includes('/issues/');
+}
+
+// --- Bonus scoring ---
+
+const BONUS_TESTS = 10;
+const BONUS_THINKING_PATH = 10;
+const BONUS_ISSUE_LINK = 10;
+const MAX_SCORE = 180;
+
+const FRESHNESS_TIERS = [
+  { maxDays: 1, pts: 10 },
+  { maxDays: 3, pts: 8 },
+  { maxDays: 7, pts: 5 },
+  { maxDays: 14, pts: 2 },
+];
+
+function freshnessPts(createdAt: string, now: number = Date.now()): { pts: number; ageDays: number } {
+  const createdMs = new Date(createdAt.endsWith('Z') ? createdAt : createdAt + 'Z').getTime();
+  const ageDays = (now - createdMs) / (1000 * 60 * 60 * 24);
+  for (const tier of FRESHNESS_TIERS) {
+    if (ageDays < tier.maxDays) return { pts: tier.pts, ageDays };
+  }
+  return { pts: 0, ageDays };
+}
+
+function fullScoreBreakdown(
+  greptileScore: number | null, ciStatus: CIStatus, hasConflicts: boolean,
+  humanComments: number, additions: number, deletions: number,
+  contribPts: number, contribRaw: number,
+  tPts: number, tpPts: number, ilPts: number, fPts: number, ageDays: number,
+) {
+  const greptile = greptileScore !== null ? greptileScore * 8 : 0;
+  let ci = 0;
+  switch (ciStatus) {
+    case 'passing': ci = 25; break;
+    case 'pending': ci = 12; break;
+    case 'unknown': ci = 8; break;
+  }
+  const conflicts = hasConflicts ? -15 : 15;
+  let comments = 0;
+  if (humanComments >= 2) comments = 20;
+  else if (humanComments === 1) comments = 10;
+  const loc = locScore(additions, deletions);
+  const baseTotal = Math.max(0, Math.min(115, greptile + ci + conflicts + comments + loc));
+
+  return {
+    total: Math.max(0, Math.min(MAX_SCORE, baseTotal + contribPts + tPts + tpPts + ilPts + fPts)),
+    greptile: { value: greptile, max: 40, input: greptileScore },
+    ci: { value: ci, max: 25, input: ciStatus },
+    conflicts: { value: conflicts, range: '-15 to +15', input: hasConflicts },
+    humanComments: { value: comments, max: 20, input: humanComments },
+    loc: { value: loc, max: 15, input: additions + deletions, note: 'Fewer changes = higher score' },
+    contributor: { value: contribPts, range: '-25 to +25', input: contribRaw },
+    tests: { value: tPts, max: 10 },
+    thinkingPath: { value: tpPts, max: 10 },
+    issueLink: { value: ilPts, max: 10 },
+    freshness: { value: fPts, max: 10, input: Math.round(ageDays) },
+  };
 }
 
 /** Create API routes with an injected DB client — no Node.js imports */
@@ -225,10 +281,14 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
 
     let candidates = rows.map(buildCandidate);
 
-    // Batch-compute contributor scores for all authors
-    const authorStatRows = await db.all<{ author: string; state: string; cnt: number }>(
-      'SELECT author, state, COUNT(*) as cnt FROM pull_requests GROUP BY author, state'
-    );
+    // Batch queries for all scoring signals
+    const [authorStatRows, testFileRows, tpRows, issueRows] = await Promise.all([
+      db.all<{ author: string; state: string; cnt: number }>('SELECT author, state, COUNT(*) as cnt FROM pull_requests GROUP BY author, state'),
+      db.all<{ pr_number: number }>(`SELECT DISTINCT pr_number FROM pr_files WHERE ${TEST_FILE_SQL}`),
+      db.all<{ number: number }>(`SELECT number FROM pull_requests WHERE ${THINKING_PATH_SQL}`),
+      db.all<{ number: number }>(`SELECT number FROM pull_requests WHERE ${ISSUE_LINK_SQL}`),
+    ]);
+
     const authorMap = new Map<string, AuthorStats>();
     for (const r of authorStatRows) {
       if (!authorMap.has(r.author)) {
@@ -246,17 +306,33 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
       s.isFirstContribution = s.totalCount === 1;
     }
 
-    // Enrich candidates with contributor score and full breakdown
+    const prsWithTests = new Set(testFileRows.map(r => r.pr_number));
+    const prsWithThinkingPath = new Set(tpRows.map(r => r.number));
+    const prsWithIssueLink = new Set(issueRows.map(r => r.number));
+    const now = Date.now();
+
+    // Enrich candidates with all scoring signals
     for (const c of candidates as any[]) {
       const stats = authorMap.get(c.author) || { openCount: 0, mergedCount: 0, closedCount: 0, totalCount: 0, mergeRate: 0, isFirstContribution: true };
       const contrib = computeContributorScore(stats);
-      const contributorPts = Math.round((contrib.score - 50) * 0.5); // -25 to +25
-      c.contributorPts = contributorPts;
-      c.contributorScore = contrib.score;
-      c.compositeScore = Math.max(0, Math.min(140, c.compositeScore + contributorPts));
+      const cPts = Math.round((contrib.score - 50) * 0.5); // -25 to +25
+      const tPts = prsWithTests.has(c.number) ? BONUS_TESTS : 0;
+      const tpPts = prsWithThinkingPath.has(c.number) ? BONUS_THINKING_PATH : 0;
+      const ilPts = prsWithIssueLink.has(c.number) ? BONUS_ISSUE_LINK : 0;
+      const fresh = freshnessPts(c.createdAt, now);
 
-      const bd = scoreBreakdown(c.greptileScore, c.ciStatus, c.hasConflicts, c.humanComments, c.additions, c.deletions);
-      c.breakdown = { ...bd, contributor: { value: contributorPts, range: '-25 to +25', input: contrib.score } };
+      c.contributorPts = cPts;
+      c.contributorScore = contrib.score;
+      c.hasTests = tPts > 0;
+      c.hasThinkingPath = tpPts > 0;
+      c.hasIssueLink = ilPts > 0;
+      c.compositeScore = Math.max(0, Math.min(MAX_SCORE,
+        c.compositeScore + cPts + tPts + tpPts + ilPts + fresh.pts));
+      c.breakdown = fullScoreBreakdown(
+        c.greptileScore, c.ciStatus, c.hasConflicts, c.humanComments,
+        c.additions, c.deletions, cPts, contrib.score,
+        tPts, tpPts, ilPts, fresh.pts, fresh.ageDays,
+      );
     }
 
     if (minScore) candidates = candidates.filter(r => r.greptileScore !== null && r.greptileScore >= parseInt(minScore));
@@ -306,7 +382,6 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     if (!row) return c.json({ error: 'PR not found' }, 404);
 
     const candidate = buildCandidate(row);
-    const breakdown = scoreBreakdown(candidate.greptileScore, candidate.ciStatus, candidate.hasConflicts, candidate.humanComments, candidate.additions, candidate.deletions);
 
     const pr = await db.get('SELECT * FROM pull_requests WHERE number = ?', [prNumber]);
     const scores = await db.all('SELECT * FROM greptile_scores WHERE pr_number = ? ORDER BY created_at DESC', [prNumber]);
@@ -319,9 +394,8 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     }));
 
     // Contributor stats
-    const author = candidate.author;
     const authorRows = await db.all<{ state: string }>(
-      'SELECT state FROM pull_requests WHERE author = ?', [author]
+      'SELECT state FROM pull_requests WHERE author = ?', [candidate.author]
     );
     const openCount = authorRows.filter(r => r.state === 'open').length;
     const mergedCount = authorRows.filter(r => r.state === 'merged').length;
@@ -329,15 +403,42 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
     const totalCount = authorRows.length;
     const decided = mergedCount + closedCount;
     const mergeRate = decided > 0 ? mergedCount / decided : 0;
-    // First contribution: this is their only PR we know about
     const isFirstContribution = totalCount === 1;
 
     const authorStats: AuthorStats = { openCount, mergedCount, closedCount, totalCount, mergeRate, isFirstContribution };
     const contributor = computeContributorScore(authorStats);
+    const cPts = Math.round((contributor.score - 50) * 0.5);
+
+    // Bonus signals
+    const testFiles = await db.get<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt FROM pr_files WHERE pr_number = ? AND (${TEST_FILE_SQL})`, [prNumber]
+    );
+    const hasTests = (testFiles?.cnt ?? 0) > 0;
+    const body = (pr as any)?.body ?? '';
+    const hasThinkingPath = detectThinkingPath(body);
+    const hasIssueLink = detectIssueLink(body);
+    const fresh = freshnessPts(candidate.createdAt);
+
+    const tPts = hasTests ? BONUS_TESTS : 0;
+    const tpPts = hasThinkingPath ? BONUS_THINKING_PATH : 0;
+    const ilPts = hasIssueLink ? BONUS_ISSUE_LINK : 0;
+
+    const finalScore = Math.max(0, Math.min(MAX_SCORE,
+      candidate.compositeScore + cPts + tPts + tpPts + ilPts + fresh.pts));
+
+    const breakdown = fullScoreBreakdown(
+      candidate.greptileScore, candidate.ciStatus, candidate.hasConflicts,
+      candidate.humanComments, candidate.additions, candidate.deletions,
+      cPts, contributor.score, tPts, tpPts, ilPts, fresh.pts, fresh.ageDays,
+    );
 
     return c.json({
       ...candidate,
-      body: (pr as any)?.body ?? null,
+      compositeScore: finalScore,
+      hasTests,
+      hasThinkingPath,
+      hasIssueLink,
+      body,
       headSha: (pr as any)?.head_sha ?? null,
       scoreBreakdown: breakdown,
       greptileScores: scores,
@@ -555,16 +656,20 @@ export function createRoutes(getDb: () => Promise<DbClient>): Hono {
   // Scoring formula explanation
   api.get('/scoring', (_c) => {
     return _c.json({
-      description: 'Composite score (0-140) computed from six signals',
+      description: `Composite score (0-${MAX_SCORE}) computed from ten signals`,
       formula: {
         greptile: { weight: '0-40', calculation: 'greptileScore * 8', note: 'Greptile bot confidence score (1-5) from PR comments' },
         ci: { weight: '0-25', values: { passing: 25, pending: 12, unknown: 8, failing: 0 } },
         conflicts: { weight: '-15 to +15', values: { noConflicts: 15, hasConflicts: -15 } },
         humanComments: { weight: '0-20', values: { '0': 0, '1': 10, '2+': 20 }, note: 'Excludes bot comments (authors matching *[bot])' },
-        loc: { weight: '0-15', calculation: 'max(0, round(15 - 3 * log10(totalLoc)))', note: 'Fewer lines changed = higher score. 50 LOC ≈ 12pts, 200 LOC ≈ 8pts, 1000 LOC ≈ 6pts' },
-        contributor: { weight: '-25 to +25', calculation: 'round((contributorScore - 50) * 0.5)', note: 'Contributor priority (0-100) centered at 50. Low merge rate authors get penalized, proven contributors get a boost' },
+        loc: { weight: '0-15', calculation: 'max(0, round(15 - 3 * log10(totalLoc)))', note: 'Fewer lines changed = higher score' },
+        contributor: { weight: '-25 to +25', calculation: 'round((contributorScore - 50) * 0.5)', note: 'Contributor priority (0-100) centered at 50' },
+        tests: { weight: '0-10', note: 'PRs that include test files (.test., _test., __tests__/, .spec., _spec.)' },
+        thinkingPath: { weight: '0-10', note: 'PRs with "Thinking Path" in description' },
+        issueLink: { weight: '0-10', note: 'PRs linking to a GitHub issue (closes/fixes/resolves # or /issues/ URL)' },
+        freshness: { weight: '0-10', tiers: FRESHNESS_TIERS, note: 'Newer PRs score higher' },
       },
-      maxScore: 140,
+      maxScore: MAX_SCORE,
       minScore: 0,
     });
   });
