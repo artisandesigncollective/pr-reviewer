@@ -240,8 +240,45 @@ export async function syncPullRequests(opts: SyncOptions = {}): Promise<void> {
     console.log();
   }
 
+  // Fetch recent merged & closed PRs for author history
+  console.log(chalk.blue('\nFetching recent merged/closed PRs for author history...'));
+  for (const prState of ['closed'] as const) {
+    try {
+      const closedPRs = await octokit.paginate(octokit.rest.pulls.list, {
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        state: 'closed',
+        sort: 'updated',
+        direction: 'desc',
+        per_page: 100,
+      }, (response, done) => {
+        // Stop after 500 to avoid excessive API usage
+        if (response.data.length >= 500) done();
+        return response.data;
+      });
+
+      let synced = 0;
+      for (const cpr of closedPRs.slice(0, 500)) {
+        const state = cpr.merged_at ? 'merged' : 'closed';
+        await db.run(`
+          INSERT INTO pull_requests (number, title, body, author, head_sha, state, labels_json, created_at, updated_at, fetched_at)
+          VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, datetime('now'))
+          ON CONFLICT(number) DO UPDATE SET state=excluded.state
+        `, [
+          cpr.number, cpr.title, cpr.body ?? null,
+          cpr.user?.login ?? 'unknown', cpr.head.sha,
+          state, cpr.created_at, cpr.updated_at,
+        ]);
+        synced++;
+      }
+      console.log(chalk.green(`  ${synced} merged/closed PRs synced`));
+    } catch (err: any) {
+      console.error(chalk.yellow(`Could not fetch closed PRs: ${err.message}`));
+    }
+  }
+
   // Fetch closed/merged counts via search API
-  console.log(chalk.blue('\nFetching closed/merged PR counts...'));
+  console.log(chalk.blue('Fetching closed/merged PR counts...'));
   try {
     const [mergedRes, closedRes] = await Promise.all([
       octokit.rest.search.issuesAndPullRequests({
