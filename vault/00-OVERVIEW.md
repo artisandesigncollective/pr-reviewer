@@ -13,3 +13,6 @@
 - `api/github_webhook.ts` — Pull Request event listener
 - `api/ai_review_engine.ts` — RAG engine analyzing code diffs for security/performance
 - `.sovereign_memory.md` — Architectural log
+
+---
+?? **Sovereign Empire Hub:** [Master Index](file:///e:/hermes/github_fleet/EMPIRE_VAULT_INDEX.md) | [Command Center](file:///e:/hermes/github_fleet/paperclip-website/frontend/SovereignDashboard.tsx)
